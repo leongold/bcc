@@ -81,6 +81,8 @@ bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <uapi/linux/limits.h>
 #include <linux/sched.h>
+#include <linux/nsproxy.h>
+#include <linux/ns_common.h>
 
 struct val_t {
     u64 id;
@@ -89,9 +91,15 @@ struct val_t {
     int flags; // EXTENDED_STRUCT_MEMBER
 };
 
+struct mnt_namespace {
+    atomic_t count;
+    struct ns_common ns;
+};
+
 struct data_t {
     u64 id;
     u64 ts;
+    u64 mnt_inum;
     u32 uid;
     int ret;
     char comm[TASK_COMM_LEN];
@@ -125,9 +133,17 @@ int trace_entry(struct pt_regs *ctx, int dfd, const char __user *filename, int f
 
 int trace_return(struct pt_regs *ctx)
 {
+    struct task_struct *task;
+    struct nsproxy *nsproxy;
+    struct mnt_namespace *mnt_ns;
+
     u64 id = bpf_get_current_pid_tgid();
     struct val_t *valp;
     struct data_t data = {};
+
+    task = (struct task_struct *)bpf_get_current_task();
+    nsproxy = task->nsproxy;
+    mnt_ns = nsproxy->mnt_ns;
 
     u64 tsp = bpf_ktime_get_ns();
 
@@ -140,6 +156,7 @@ int trace_return(struct pt_regs *ctx)
     bpf_probe_read(&data.fname, sizeof(data.fname), (void *)valp->fname);
     data.id = valp->id;
     data.ts = tsp / 1000;
+    data.mnt_inum = mnt_ns->ns.inum;
     data.uid = bpf_get_current_uid_gid();
     data.flags = valp->flags; // EXTENDED_STRUCT_MEMBER
     data.ret = PT_REGS_RC(ctx);
@@ -223,8 +240,8 @@ def print_event(cpu, data, size):
     if args.print_uid:
         print("%-6d" % event.uid, end="")
 
-    print("%-6d %-16s %4d %3d " %
-          (event.id & 0xffffffff if args.tid else event.id >> 32,
+    print("%-6d %-6d %-16s %4d %3d " %
+          (event.mnt_inum, event.id & 0xffffffff if args.tid else event.id >> 32,
            event.comm.decode('utf-8', 'replace'), fd_s, err), end="")
 
     if args.extended_fields:
